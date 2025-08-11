@@ -1,20 +1,23 @@
 """
-Implement a Roon Remote extension that reads keybaord events
+Implement a Roon Remote extension that reads keyboard events
 from a FLIRC device and converts those events into transport
 commands towards a certain _Zone_ in Roon.
 """
-# !/usr/bin/python
+# !/usr/bin/env python
 import logging
 import signal
 import sys
+import time
 from pathlib import Path
 
 import evdev
-from evdev import InputDevice
+from evdev import InputDevice, ecodes, categorize
 
 from app import RoonController, RoonOutput, RemoteConfig, RemoteConfigE, RemoteKeycodeMapping, RoonControllerE
+# Import the specific exception for handling zone errors
+from app.output import RoonOutputE
 
-logging.basicConfig(level=logging.DEBUG,
+logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s %(module)s: %(message)s')
 logger = logging.getLogger('roon_remote')
 
@@ -42,51 +45,54 @@ def get_event_device_for_string(dev_name: str):
     return dev
 
 
-def monitor_remote(zone: RoonOutput, dev: InputDevice, mapping: RemoteKeycodeMapping):
+def monitor_remote(zone: RoonOutput, dev: InputDevice, mapping: RemoteKeycodeMapping, zone_name: str):
     """start an event loop on InputDevice"""
-    logger.info("Job monitorRemote started")
+    logger.info("Starting event monitor for zone: '%s'", zone_name)
 
     if not dev:
         raise BaseException('could not open DEV')
 
     logger.debug('opening exclusively InputDevice: %s', dev.path)
     for event in dev.read_loop():
-
         if event.value != 1:
             # ignore everything that is not KEY_DOWN
             continue
 
-        # logging.debug(str(categorize(event)))
+        event_name = ecodes.KEY[event.code]
+        logging.debug(str(categorize(event)))
         try:
-            # logging.debug("Status: {}".format('uninitialized'))
-            # logging.debug("KeyCode: {}".format(event.code))
-            if event.code in mapping.to_key_code('prev'):
+            if event_name == mapping.to_key_code('prev'):
                 zone.previous()
-            elif event.code in mapping.to_key_code('skip'):
+            elif event_name == mapping.to_key_code('skip'):
                 zone.skip()
-            elif event.code in mapping.to_key_code('stop'):
+            elif event_name == mapping.to_key_code('stop'):
                 zone.stop()
-            elif event.code in mapping.to_key_code('play_pause'):
+            elif event_name == mapping.to_key_code('play_pause'):
                 if zone.state == "playing":
                     zone.pause()
                 else:
                     zone.repeat(False)
                     zone.play()
-            elif event.code in mapping.to_key_code('vol_up'):
+            elif event_name == mapping.to_key_code('vol_up'):
                 zone.volume_up(2)
-            elif event.code in mapping.to_key_code('vol_down'):
+            elif event_name == mapping.to_key_code('vol_down'):
                 zone.volume_down(2)
-            elif event.code in mapping.to_key_code('mute'):
+            elif mapping.to_key_code('mute') in event_name:
                 zone.mute(not zone.is_muted())
-            elif event.code in mapping.to_key_code('fall_asleep'):
+            elif event_name == mapping.to_key_code('fall_asleep'):
                 zone.play_playlist('wellenrauschen')
-            elif event.code in mapping.to_key_code('play_radio'):
+            elif event_name == mapping.to_key_code('play_radio'):
                 zone.play_radio_station(station_name="Radio Paradise (320k aac)")
 
             logger.debug("Received Code: %s", repr(event.code))
 
+        except RoonOutputE as e:
+            # The zone is gone. Re-raise the exception to be handled by the main loop.
+            logger.warning("Lost connection to zone '%s'.", zone_name)
+            raise e
         except Exception as exception:
-            logging.error("Caught exception: %s (%s)", exception, type(exception))
+            # For other, non-critical errors, just log them and continue monitoring.
+            logging.error("Caught non-critical exception in monitor loop: %s (%s)", exception, type(exception))
     logger.info("Job monitorRemote stopped")
 
 
@@ -95,7 +101,6 @@ def main():
     logger.info("starting %s", __file__)
     signal.signal(signal.SIGINT, exit_handler)
     signal.signal(signal.SIGTERM, exit_handler)
-    controller = None
 
     try:
         config = RemoteConfig(Path('app_info.json'))
@@ -106,32 +111,66 @@ def main():
     mapping = config.key_mapping
     logging.info(mapping.edge)
 
-    input_dev_name = "flirc Keyboard"
-    event_dev = get_event_device_for_string(input_dev_name)
+    # List of device names to try, in order of preference
+    device_names_to_try = ["flirc Keyboard", "gpio_ir_recv"]
+    event_dev = None
+    input_dev_name = None
+
+    # Loop through the names until a device is found
+    for name in device_names_to_try:
+        device = get_event_device_for_string(name)
+        if device:
+            event_dev = device
+            input_dev_name = name  # Preserves the name of the found device
+            logging.info('Found InputDevice: "%s"', input_dev_name)
+            break  # Exit the loop on first success
+
     if not event_dev:
-        logging.error('Could not find any InputDevice with name: "%s"', input_dev_name)
+        logging.error('Could not find a valid InputDevice. Tried: %s', device_names_to_try)
         sys.exit(1)
 
-    logging.debug('found input device: %s', event_dev)
+    # --- Main Application Resiliency Loop ---
+    # This loop runs forever. If the connection to the Roon Core or the Zone
+    # is lost, it will be caught and the loop will restart the connection process.
+    while True:
+        controller = None
+        output = None
 
-    try:
-        controller = RoonController(config.app_info, Path('.roon-token'))
-    except RoonControllerE as ex:
-        logging.error("Failed to initiate the controller: %s" % ex.msg)
+        # 1. Connect to the Roon Core
+        try:
+            if not controller:
+                controller = RoonController(config.app_info, Path('.roon-token'))
+                logging.info("Successfully connected to Roon Core.")
+        except RoonControllerE as ex:
+            logging.error("Failed to connect to Roon Core: %s. Retrying in 30 seconds...", ex.msg)
+            time.sleep(30)
+            continue
 
-    output = controller.get_output(config.zone)
-    if not output:
-        logging.error('failed to find zone "{}"'.format(config.zone))
-        sys.exit(1)
+        # 2. Find the specified Zone
+        try:
+            if not output:
+                output = controller.get_output(config.zone)
+                logging.info('Successfully found zone: "%s"', config.zone)
+        except RoonOutputE:
+            logging.warning('Zone "%s" not found. Is the device powered on? Retrying in 30 seconds...', config.zone)
+            time.sleep(30)
+            continue
 
-    try:
-        monitor_remote(output, event_dev, config.key_mapping)
-    except Exception as exception:
-        logging.error("Critical exception: %s", exception)
+        # 3. Monitor for remote control events
+        try:
+            # This function will block until an error occurs (e.g., zone disappears)
+            monitor_remote(output, event_dev, mapping, config.zone)
+            logging.warning("Event monitor stopped unexpectedly. Restarting...")
+        except RoonOutputE as e:
+            # This is expected if the zone disappears during operation
+            logging.warning("Zone communication error: %s. Re-establishing connection...", e)
+        except Exception as e:
+            # This catches other critical errors, like the input device disconnecting
+            logging.error("A critical error occurred: %s. Restarting...", e)
 
-    controller.shutdown()
-    logging.info("terminated")
-    sys.exit(0)
+        # Wait a bit before restarting the whole process from the top
+        controller.shutdown()
+        time.sleep(10)
 
 
 if __name__ == '__main__':
