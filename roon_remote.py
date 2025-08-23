@@ -6,6 +6,7 @@ commands towards a certain _Zone_ in Roon.
 # !/usr/bin/env python
 import logging
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from app import RoonController, RoonOutput, RemoteConfig, RemoteConfigE, RemoteK
 # Import the specific exception for handling zone errors
 from app.output import RoonOutputE
 
+# Set default logging to INFO. DEBUG messages will be hidden.
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s %(module)s: %(message)s')
 logger = logging.getLogger('roon_remote')
@@ -43,6 +45,32 @@ def get_event_device_for_string(dev_name: str):
             logger.debug('found device with name: "%s" on path: %s', device.name, device.path)
             break
     return dev
+
+
+def is_dac_present():
+    """Check if the OS can see any soundcards using aplay."""
+    try:
+        # Run 'aplay -l', capturing stdout and redirecting stderr into it.
+        result = subprocess.run(
+            ['aplay', '-l'],
+            stdout=subprocess.PIPE,      # Capture the standard output
+            stderr=subprocess.STDOUT,   # Redirect stderr into stdout
+            text=True,                  # Decode the output as text
+            check=False
+        )
+        # Now result.stdout contains the combined output stream.
+        if "no soundcards found" in result.stdout:
+            logger.debug("aplay -l output indicates no soundcards.")
+            return False
+        else:
+            logger.debug("aplay -l output indicates one or more soundcards.")
+            return True
+    except FileNotFoundError:
+        logger.error("'aplay' command not found. Cannot check for DAC presence.")
+        return True
+    except Exception as e:
+        logger.error("An error occurred while checking for DAC: %s", e)
+        return True
 
 
 def monitor_remote(zone: RoonOutput, dev: InputDevice, mapping: RemoteKeycodeMapping, zone_name: str):
@@ -87,11 +115,9 @@ def monitor_remote(zone: RoonOutput, dev: InputDevice, mapping: RemoteKeycodeMap
             logger.debug("Received Code: %s", repr(event.code))
 
         except RoonOutputE as e:
-            # The zone is gone. Re-raise the exception to be handled by the main loop.
             logger.warning("Lost connection to zone '%s'.", zone_name)
             raise e
         except Exception as exception:
-            # For other, non-critical errors, just log them and continue monitoring.
             logging.error("Caught non-critical exception in monitor loop: %s (%s)", exception, type(exception))
     logger.info("Job monitorRemote stopped")
 
@@ -111,65 +137,72 @@ def main():
     mapping = config.key_mapping
     logging.info(mapping.edge)
 
-    # List of device names to try, in order of preference
     device_names_to_try = ["flirc Keyboard", "gpio_ir_recv"]
     event_dev = None
     input_dev_name = None
 
-    # Loop through the names until a device is found
     for name in device_names_to_try:
         device = get_event_device_for_string(name)
         if device:
             event_dev = device
-            input_dev_name = name  # Preserves the name of the found device
+            input_dev_name = name
             logging.info('Found InputDevice: "%s"', input_dev_name)
-            break  # Exit the loop on first success
+            break
 
     if not event_dev:
         logging.error('Could not find a valid InputDevice. Tried: %s', device_names_to_try)
         sys.exit(1)
 
-    # --- Main Application Resiliency Loop ---
-    # This loop runs forever. If the connection to the Roon Core or the Zone
-    # is lost, it will be caught and the loop will restart the connection process.
+    # --- Outer loop for Core connection resiliency ---
     while True:
         controller = None
-        output = None
-
-        # 1. Connect to the Roon Core
-        try:
-            if not controller:
+        # 1. Establish connection to the Roon Core
+        while not controller:
+            try:
                 controller = RoonController(config.app_info, Path('.roon-token'))
                 logging.info("Successfully connected to Roon Core.")
-        except RoonControllerE as ex:
-            logging.error("Failed to connect to Roon Core: %s. Retrying in 30 seconds...", ex.msg)
-            time.sleep(30)
-            continue
+            except RoonControllerE as ex:
+                logging.error("Failed to connect to Roon Core: %s. Retrying in 60 seconds...", ex.msg)
+                time.sleep(60)
 
-        # 2. Find the specified Zone
-        try:
-            if not output:
+        # --- Inner loop for Zone discovery and event monitoring ---
+        has_logged_zone_warning = False
+        while True:
+            output = None
+            try:
+                # 2. Find the specified Zone
                 output = controller.get_output(config.zone)
                 logging.info('Successfully found zone: "%s"', config.zone)
-        except RoonOutputE:
-            logging.warning('Zone "%s" not found. Is the device powered on? Retrying in 30 seconds...', config.zone)
-            time.sleep(30)
-            continue
+                has_logged_zone_warning = False  # Reset flag on success
 
-        # 3. Monitor for remote control events
-        try:
-            # This function will block until an error occurs (e.g., zone disappears)
-            monitor_remote(output, event_dev, mapping, config.zone)
-            logging.warning("Event monitor stopped unexpectedly. Restarting...")
-        except RoonOutputE as e:
-            # This is expected if the zone disappears during operation
-            logging.warning("Zone communication error: %s. Re-establishing connection...", e)
-        except Exception as e:
-            # This catches other critical errors, like the input device disconnecting
-            logging.error("A critical error occurred: %s. Restarting...", e)
+                # 3. Monitor for remote control events
+                monitor_remote(output, event_dev, mapping, config.zone)
+                logging.warning("Event monitor stopped unexpectedly. Re-checking for zone...")
+                has_logged_zone_warning = False
 
-        # Wait a bit before restarting the whole process from the top
-        controller.shutdown()
+            except RoonOutputE:
+                if not has_logged_zone_warning:
+                    if not is_dac_present():
+                        logging.warning('Zone "%s" not found. No audio device detected by OS. Is the DAC powered on? Waiting for zone to appear...', config.zone)
+                    else:
+                        logging.warning('Zone "%s" not found, but an audio device IS detected. Check for a typo in the configured zone name. Waiting for zone to appear...', config.zone)
+                    has_logged_zone_warning = True
+                else:
+                    logging.debug("Still waiting for zone '%s'...", config.zone)
+                time.sleep(30)
+                # Continue in the inner loop to retry finding the zone without full reconnection
+
+            except (RoonControllerE, ConnectionError) as e:
+                logging.error("Connection to Roon Core lost: %s. Reconnecting...", e)
+                break  # Break inner loop to trigger outer loop's reconnection logic
+
+            except Exception as e:
+                logging.error("A critical error occurred: %s. Reconnecting...", e)
+                break  # Break inner loop to trigger outer loop's reconnection logic
+
+        # If we break from the inner loop, shutdown and wait before retrying the Core connection
+        if controller:
+            controller.shutdown()
         time.sleep(10)
 
 

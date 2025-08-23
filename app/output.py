@@ -5,7 +5,7 @@ from typing import Dict, List
 
 from .controller import RoonApi
 
-logger = logging.getLogger('zone')
+logger = logging.getLogger('output')
 
 
 class RoonOutputE(BaseException):
@@ -74,7 +74,8 @@ class RoonOutput:
         logger.debug('finding output "{}"'.format(name))
         o = self._api.output_by_name(name)
         if not o:
-            logger.error('could not find output "{}"'.format(name))
+            # Changed from .error to .debug to quiet the logs while waiting for a zone
+            logger.debug('could not find output "%s" (this is normal if the device is off)', name)
             return None
         oid = o['output_id']
         zid = o['zone_id']
