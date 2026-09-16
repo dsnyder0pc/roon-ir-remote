@@ -55,8 +55,6 @@ class FakeZone:
     def volume_down(self, step): self._record('volume_down(%d)' % step)
     def mute(self, enabled): self._record('mute(%s)' % enabled)
     def is_muted(self): return False
-    def play_playlist(self, name): self._record('play_playlist(%s)' % name)
-    def play_radio_station(self, station_name): self._record('play_radio(%s)' % station_name)
 
 
 @contextlib.contextmanager

@@ -210,8 +210,7 @@ def test_exception_messages_survive_str():
     """main() logs these; an empty str(e) is how the first diagnosis went blind."""
     from app.config import RemoteConfigE
     from app.output import RoonOutputE
-    from app.amplifier import AmplifierE
-    for cls in (RemoteConfigE, RoonControllerE, RoonOutputE, AmplifierE):
+    for cls in (RemoteConfigE, RoonControllerE, RoonOutputE):
         assert str(cls('boom')) == 'boom', cls.__name__
 
 

@@ -136,28 +136,6 @@ class RoonOutput:
     def mute(self, enabled=False):
         self._api.mute(self._oid, enabled)
 
-    def play_playlist(self, playlist_name, volume: int = 20):
-        logger.debug("play_playlist: %s" % playlist_name)
-        self.stop()
-        self._api.mute(self._oid, False)
-        self._api.change_volume(self._oid, volume, method="absolute")
-        self._api.shuffle(self.zone_id, shuffle=False)
-        self._api.repeat(self.zone_id, repeat=True)
-        # path = ['Library', 'Artists', 'Sting', 'The Bridge']
-        path = ['My Live Radio', 'Radio Paradise (320k aac)']
-        if not self._api.play_media(self.zone_id, path, action="Play Now"):
-            logger.error(f"Failed to media for : {repr(path)}")
-
-    def play_radio_station(self, station_name: str):
-        """
-        Play a certain radio station
-        """
-        logger.debug("play radio: %s" % station_name)
-        self.stop()
-        self._api.change_volume(self._oid, 20, method="absolute")
-        path = ['My Live Radio', station_name]
-        self._api.play_media(self.zone_id, path=path, action="Play Now")
-
     def is_muted(self) -> bool:
         """Return True if output is muted, otherwise False."""
         o = self._get_output()

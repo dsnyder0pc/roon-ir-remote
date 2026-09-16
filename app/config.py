@@ -25,8 +25,7 @@ class RemoteKeycodeMapping:
 
     # transport actions the event loop knows how to perform, in the order they
     # win when two of them are bound to the same key code
-    ACTIONS = ('prev', 'skip', 'stop', 'play_pause', 'vol_up', 'vol_down',
-               'mute', 'fall_asleep', 'play_radio')
+    ACTIONS = ('prev', 'skip', 'stop', 'play_pause', 'vol_up', 'vol_down', 'mute')
 
     def __init__(self, mapping_dict: Dict):
         if 'codes' not in mapping_dict.keys():
@@ -131,13 +130,6 @@ class RemoteConfig:
     @property
     def zone(self):
         return self._config['zone']['name']
-
-    @property
-    def amplifier(self):
-        if 'amplifier' in self._config['zone'].keys():
-            return self._config['zone']['amplifier']
-        else:
-            return None
 
     @property
     def key_mapping(self) -> RemoteKeycodeMapping:

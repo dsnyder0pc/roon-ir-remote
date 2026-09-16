@@ -75,13 +75,12 @@ def test_to_action_is_the_reverse_of_to_key_code():
 def test_to_key_code_still_raises_for_unknown_action():
     mapping = RemoteKeycodeMapping({'codes': dict(THEATER_CODES)})
     with pytest.raises(RemoteConfigE):
-        mapping.to_key_code('fall_asleep')
+        mapping.to_key_code('not_a_real_action')
 
 
 def test_exceptions_are_catchable_as_exception():
     """All must be caught by 'except Exception', not escape as BaseException."""
     from app.controller import RoonControllerE
     from app.output import RoonOutputE
-    from app.amplifier import AmplifierE
-    for cls in (RemoteConfigE, RoonControllerE, RoonOutputE, AmplifierE):
+    for cls in (RemoteConfigE, RoonControllerE, RoonOutputE):
         assert issubclass(cls, Exception), cls.__name__

@@ -185,8 +185,6 @@ def build_transport_actions(zone: RoonOutput) -> Dict[str, Callable[[], None]]:
         'vol_up': lambda: zone.volume_up(2),
         'vol_down': lambda: zone.volume_down(2),
         'mute': lambda: zone.mute(not zone.is_muted()),
-        'fall_asleep': lambda: zone.play_playlist('wellenrauschen'),
-        'play_radio': lambda: zone.play_radio_station(station_name="Radio Paradise (320k aac)"),
     }
 
 

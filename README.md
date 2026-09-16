@@ -14,10 +14,7 @@ The goals is to provide a bridge that converts received IR commands
     - play, stop, play_pause, pause
     - skip, previous
 
-* allows to initate the volume when amplifier
-  with rest API exists
-
-  	- currently only Yamaha API version 1 is supported
+* volume and mute, on outputs that support it
 
 ## Development Language
 
