@@ -156,3 +156,21 @@ def test_waiting_for_the_socket_feeds_the_progress_hook():
         controller._wait_until_ready('192.0.2.1', 9330)
 
     assert len(ticks) > 1
+
+
+def test_the_socket_wait_shares_the_api_deadline():
+    """
+    SocketAwareRoonApi already waited for the same thing during construction.
+    Waiting a second full timeout here would double how long an unreachable
+    core takes to report.
+    """
+    import time as _time
+    api = FakeApi(FakeSocket(connected=False))
+    api._ready_deadline = _time.monotonic() - 1      # the api spent the budget
+    controller = controller_with(api, connect=30)
+
+    started = _time.monotonic()
+    with pytest.raises(RoonControllerE):
+        controller._wait_until_ready('192.0.2.1', 9330)
+
+    assert _time.monotonic() - started < 1, "should not start a second 30s wait"

@@ -55,6 +55,52 @@ def close_abandoned_connects() -> int:
     return closed
 
 
+class SocketAwareRoonApi(RoonApi):
+    """
+    A RoonApi whose first requests wait for the websocket instead of failing
+    into it.
+
+    With blocking_init=False the constructor asks for zones and outputs
+    straight away, before the socket has connected. send_request logs an
+    error and returns False, and _request then spins 2.5s waiting on a reply
+    that was never sent - twice, so every startup costs five seconds and two
+    misleading errors in the journal.
+
+    The library means to handle this: _request has a wait-for-ready loop. It
+    guards it with `if not self._roonsocket`, which _server_setup has already
+    made truthy, so the loop never runs.
+
+    The wait is bounded by a deadline taken at construction, so this cannot
+    become the hang that blocking_init was. On expiry, or against a socket
+    that has already failed, it falls through to the library's own behaviour
+    and _wait_until_ready reports the failed connect as it does now.
+    """
+
+    SOCKET_WAIT = 30
+
+    def __init__(self, *args, on_progress=None, **kwargs):
+        self._ready_deadline = time.monotonic() + self.SOCKET_WAIT
+        self._progress = on_progress or (lambda: None)
+        super().__init__(*args, **kwargs)
+
+    def _await_ready(self) -> None:
+        """Wait for registration, but never past the deadline."""
+        while not self.ready and time.monotonic() < self._ready_deadline:
+            socket = getattr(self, '_roonsocket', None)
+            if socket is not None and getattr(socket, 'failed_state', False):
+                return  # the connection is already lost; nothing to wait for
+            self._progress()
+            time.sleep(0.05)
+
+    def _get_zones(self):
+        self._await_ready()
+        return super()._get_zones()
+
+    def _get_outputs(self):
+        self._await_ready()
+        return super()._get_outputs()
+
+
 class RoonControllerE(Exception):
     def __init__(self, msg):
         super(RoonControllerE, self).__init__(msg)
@@ -72,8 +118,9 @@ class RoonController(object):
 
     # RoonApi's own blocking init waits for the core forever, and its socket
     # watcher only starts once the constructor returns, so a core that is not
-    # answering parks the process with nothing left to recover it
-    CONNECT_TIMEOUT = 30
+    # answering parks the process with nothing left to recover it. Normally
+    # the api's own deadline governs; this is the fallback.
+    CONNECT_TIMEOUT = SocketAwareRoonApi.SOCKET_WAIT
 
     # connected but unregistered means Roon is waiting for someone to enable
     # the extension in Settings > Extensions, so give that a person's patience
@@ -106,8 +153,8 @@ class RoonController(object):
             self._token = RoonToken(token)
 
         token = None if self._token.is_empty() else self._token.to_string()
-        self._api = RoonApi(self._info, token=token, host=server[0], port=server[1],
-                            blocking_init=False)
+        self._api = SocketAwareRoonApi(self._info, token=token, host=server[0], port=server[1],
+                                       blocking_init=False, on_progress=self._on_progress)
         self._wait_until_ready(server[0], server[1])
 
         self._token.set(self._api.token)
@@ -169,8 +216,17 @@ class RoonController(object):
         return bool(getattr(socket, 'connected', False))
 
     def _wait_for_socket(self, host, port) -> None:
-        """Wait for the websocket, giving up early if it has already failed."""
-        deadline = time.monotonic() + self.CONNECT_TIMEOUT
+        """
+        Wait for the websocket, giving up early if it has already failed.
+
+        Shares the deadline the api took at construction, which it has
+        already spent some of waiting for this same thing. Two independent
+        timeouts for one condition only doubles how long a dead core takes
+        to report.
+        """
+        deadline = getattr(self._api, '_ready_deadline', None)
+        if deadline is None:
+            deadline = time.monotonic() + self.CONNECT_TIMEOUT
         while time.monotonic() < deadline:
             if self._socket_is_open():
                 return
