@@ -8,7 +8,7 @@ logger = logging.getLogger("yamaha")
 logger.setLevel(logging.DEBUG)
 
 
-class AmplifierE(BaseException):
+class AmplifierE(Exception):
 
     def __init__(self, msg):
         self._msg = msg
@@ -70,7 +70,7 @@ class Yamaha(Amplifier):
         if 200 <= result.status_code <= 300:
             return result.json()
         else:
-            raise BaseException()
+            raise AmplifierE("request to %s failed with status %s" % (_ep, result.status_code))
 
     def _mute_control(self, enabled=False) -> bool:
         _enabled = "true" if enabled else "false"

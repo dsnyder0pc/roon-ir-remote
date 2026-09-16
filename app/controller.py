@@ -14,7 +14,7 @@ logger = logging.getLogger('roon-controller')
 logger.setLevel(logging.DEBUG)
 
 
-class RoonControllerE(BaseException):
+class RoonControllerE(Exception):
     def __init__(self, msg):
         super(RoonControllerE, self).__init__()
         self.msg = msg
@@ -33,11 +33,11 @@ class RoonController(object):
         self._zone = None
 
         server = self._discover_server()
-        logger.debug("Received: %s" % server[0])
-
-        if not server:
+        if not server or not server[0]:
             logger.error("failed to discover a server")
             raise RoonControllerE("failed to discover a Roon server")
+
+        logger.debug("Received: %s" % server[0])
 
         if token:
             self._token = RoonToken(token)
@@ -60,9 +60,14 @@ class RoonController(object):
         return the very first server discovered.
         """
         discover = RoonDiscovery(None)
-        servers = discover.all()
+        try:
+            servers = discover.all()
+        except OSError as ex:
+            # the network may not be up yet, e.g. when started at boot
+            raise RoonControllerE("discovery failed: %s" % ex)
+        finally:
+            discover.stop()
         logger.debug("Discovery found: %s" % repr(servers))
-        discover.stop()
         if not servers:
             logger.debug('failed to discover Roon server')
             return None, 0
@@ -89,4 +94,8 @@ class RoonController(object):
         self._api.stop()
 
     def __del__(self):
-        self._api.stop()
+        # __init__ may have raised before _api was assigned, and the interpreter
+        # clears instance dicts at shutdown, so this cannot assume the attribute
+        api = getattr(self, '_api', None)
+        if api:
+            api.stop()

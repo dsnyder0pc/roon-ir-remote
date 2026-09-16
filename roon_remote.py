@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Callable, Dict, List
 
 import evdev
 from evdev import InputDevice, ecodes, categorize
@@ -73,12 +74,48 @@ def is_dac_present():
         return True
 
 
+def key_names_for(code: int) -> List[str]:
+    """
+    Return every evdev name for a key code. Codes that several names share
+    (KEY_MUTE is also KEY_MIN_INTERESTING) come back from evdev as a list.
+    """
+    names = ecodes.KEY[code]
+    if isinstance(names, (list, tuple)):
+        return list(names)
+    return [names]
+
+
+def build_transport_actions(zone: RoonOutput) -> Dict[str, Callable[[], None]]:
+    """Map every transport action name onto the call that performs it."""
+
+    def play_pause():
+        if zone.state == "playing":
+            zone.pause()
+        else:
+            zone.repeat(False)
+            zone.play()
+
+    return {
+        'prev': zone.previous,
+        'skip': zone.skip,
+        'stop': zone.stop,
+        'play_pause': play_pause,
+        'vol_up': lambda: zone.volume_up(2),
+        'vol_down': lambda: zone.volume_down(2),
+        'mute': lambda: zone.mute(not zone.is_muted()),
+        'fall_asleep': lambda: zone.play_playlist('wellenrauschen'),
+        'play_radio': lambda: zone.play_radio_station(station_name="Radio Paradise (320k aac)"),
+    }
+
+
 def monitor_remote(zone: RoonOutput, dev: InputDevice, mapping: RemoteKeycodeMapping, zone_name: str):
     """start an event loop on InputDevice"""
     logger.info("Starting event monitor for zone: '%s'", zone_name)
 
     if not dev:
-        raise BaseException('could not open DEV')
+        raise RuntimeError('could not open DEV')
+
+    transport_actions = build_transport_actions(zone)
 
     logger.debug('opening exclusively InputDevice: %s', dev.path)
     for event in dev.read_loop():
@@ -86,32 +123,22 @@ def monitor_remote(zone: RoonOutput, dev: InputDevice, mapping: RemoteKeycodeMap
             # ignore everything that is not KEY_DOWN
             continue
 
-        event_name = ecodes.KEY[event.code]
+        key_names = key_names_for(event.code)
         logging.debug(str(categorize(event)))
-        try:
-            if event_name == mapping.to_key_code('prev'):
-                zone.previous()
-            elif event_name == mapping.to_key_code('skip'):
-                zone.skip()
-            elif event_name == mapping.to_key_code('stop'):
-                zone.stop()
-            elif event_name == mapping.to_key_code('play_pause'):
-                if zone.state == "playing":
-                    zone.pause()
-                else:
-                    zone.repeat(False)
-                    zone.play()
-            elif event_name == mapping.to_key_code('vol_up'):
-                zone.volume_up(2)
-            elif event_name == mapping.to_key_code('vol_down'):
-                zone.volume_down(2)
-            elif mapping.to_key_code('mute') in event_name:
-                zone.mute(not zone.is_muted())
-            elif event_name == mapping.to_key_code('fall_asleep'):
-                zone.play_playlist('wellenrauschen')
-            elif event_name == mapping.to_key_code('play_radio'):
-                zone.play_radio_station(station_name="Radio Paradise (320k aac)")
 
+        action = next((a for a in map(mapping.to_action, key_names) if a), None)
+        if action is None:
+            # a remote has more buttons than we bind; pressing one is not an error
+            logger.debug("ignoring unmapped key %s (code %s)", key_names, event.code)
+            continue
+
+        handler = transport_actions.get(action)
+        if handler is None:
+            logger.warning("no handler for transport action '%s'", action)
+            continue
+
+        try:
+            handler()
             logger.debug("Received Code: %s", repr(event.code))
 
         except RoonOutputE as e:
@@ -163,6 +190,12 @@ def main():
                 logging.info("Successfully connected to Roon Core.")
             except RoonControllerE as ex:
                 logging.error("Failed to connect to Roon Core: %s. Retrying in 60 seconds...", ex.msg)
+                time.sleep(60)
+            except Exception as ex:
+                # anything the controller or the Roon API throws on the way up
+                # must keep us in this loop, never take the process down
+                logging.error("Unexpected error connecting to Roon Core: %s (%s). Retrying in 60 seconds...",
+                              ex, type(ex).__name__)
                 time.sleep(60)
 
         # --- Inner loop for Zone discovery and event monitoring ---

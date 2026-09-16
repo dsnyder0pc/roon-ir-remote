@@ -8,7 +8,7 @@ from .controller import RoonApi
 logger = logging.getLogger('output')
 
 
-class RoonOutputE(BaseException):
+class RoonOutputE(Exception):
     """Basic Class for Output """
     def __init__(self, msg):
         self.msg = msg
