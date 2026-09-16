@@ -30,13 +30,28 @@ class RoonController(object):
     # without saying so, but it is not free, so it runs on its own cadence
     PROBE_INTERVAL = 300
 
-    def __init__(self, app_info: Dict, token: Path = '.roon-token'):
+    # RoonApi's own blocking init waits for the core forever, and its socket
+    # watcher only starts once the constructor returns, so a core that is not
+    # answering parks the process with nothing left to recover it
+    CONNECT_TIMEOUT = 30
+
+    # connected but unregistered means Roon is waiting for someone to enable
+    # the extension in Settings > Extensions, so give that a person's patience
+    AUTHORIZE_TIMEOUT = 300
+
+    # zones and outputs arrive on the subscription just after registration
+    SUBSCRIBE_TIMEOUT = 10
+
+    def __init__(self, app_info: Dict, token: Path = '.roon-token', on_progress=None):
         super(RoonController, self).__init__()
         self._info = app_info
         self._token_path = token
         self._token = None
         self._zone = None
         self._last_probe = time.monotonic()
+        # called while we wait, so a caller watching for a wedged process can
+        # tell "still waiting for the core" from "stopped running"
+        self._on_progress = on_progress or (lambda: None)
 
         server = self._discover_server()
         if not server or not server[0]:
@@ -48,14 +63,13 @@ class RoonController(object):
         if token:
             self._token = RoonToken(token)
 
-        if self._token.is_empty():
-            self._api = RoonApi(self._info, token=None, host=server[0], port=server[1])
-        else:
-            self._api = RoonApi(self._info, token=self._token.to_string(), host=server[0], port=server[1])
+        token = None if self._token.is_empty() else self._token.to_string()
+        self._api = RoonApi(self._info, token=token, host=server[0], port=server[1],
+                            blocking_init=False)
+        self._wait_until_ready(server[0], server[1])
 
-        if self._api:
-            self._token.set(self._api.token)
-            logger.debug("Connected to API: %s, %s, %s" % (self._api.host, self._api.core_name, self._api.core_id))
+        self._token.set(self._api.token)
+        logger.debug("Connected to API: %s, %s, %s" % (self._api.host, self._api.core_name, self._api.core_id))
 
         logger.debug('instantiated a Roon controller on: %s' % self._api.core_name)
 
@@ -93,15 +107,64 @@ class RoonController(object):
             _data = json.load(f)
         return _data
 
+    def _wait_until(self, timeout: float, is_done) -> bool:
+        """Poll is_done until it is true or the timeout runs out."""
+        deadline = time.monotonic() + timeout
+        while not is_done() and time.monotonic() < deadline:
+            self._on_progress()
+            time.sleep(0.05)
+        return is_done()
+
+    def _socket(self):
+        """The RoonApi websocket, which is private to the library."""
+        # pylint: disable=protected-access
+        return getattr(self._api, '_roonsocket', None)
+
+    def _socket_is_open(self) -> bool:
+        socket = self._socket()
+        if socket is None or getattr(socket, 'failed_state', False):
+            return False
+        return bool(getattr(socket, 'connected', False))
+
+    def _wait_for_socket(self, host, port) -> None:
+        """Wait for the websocket, giving up early if it has already failed."""
+        deadline = time.monotonic() + self.CONNECT_TIMEOUT
+        while time.monotonic() < deadline:
+            if self._socket_is_open():
+                return
+            socket = self._socket()
+            if socket is None or getattr(socket, 'failed_state', False):
+                raise RoonControllerE("websocket to %s:%s failed" % (host, port))
+            self._on_progress()
+            time.sleep(0.05)
+        raise RoonControllerE("no websocket to %s:%s after %ds" % (host, port, self.CONNECT_TIMEOUT))
+
+    def _wait_until_ready(self, host, port) -> None:
+        """
+        Wait for the socket and the registration, but not forever.
+
+        RoonApi's blocking init has no timeout: point it at a core that is not
+        answering and the constructor never returns, which parks the caller in
+        a place where even the library's own socket watcher has not started.
+        """
+        try:
+            self._wait_for_socket(host, port)
+
+            if not getattr(self._api, 'ready', False):
+                logger.info("connected to %s, waiting for the extension to be enabled in Roon" % host)
+            if not self._wait_until(self.AUTHORIZE_TIMEOUT, lambda: bool(getattr(self._api, 'ready', False))):
+                raise RoonControllerE("%s did not register us within %ds; is the extension enabled in Roon?"
+                                      % (host, self.AUTHORIZE_TIMEOUT))
+        except RoonControllerE:
+            self._api.stop()
+            raise
+
+        if not self._wait_until(self.SUBSCRIBE_TIMEOUT, lambda: bool(self._api.outputs)):
+            logger.warning("no outputs from %s yet, carrying on" % host)
+
     def is_connected(self) -> bool:
         """Passive check of the websocket state. Cheap, safe to call often."""
-        # pylint: disable=protected-access
-        socket = getattr(self._api, '_roonsocket', None)
-        if socket is None:
-            return False
-        if getattr(socket, 'failed_state', False):
-            return False
-        return bool(getattr(socket, 'connected', False)) and bool(getattr(self._api, 'ready', False))
+        return self._socket_is_open() and bool(getattr(self._api, 'ready', False))
 
     def probe(self) -> bool:
         """

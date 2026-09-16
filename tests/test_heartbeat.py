@@ -165,6 +165,7 @@ def controller_with(api):
     controller = RoonController.__new__(RoonController)
     controller._api = api
     controller._last_probe = time.monotonic()
+    controller._on_progress = lambda: None
     return controller
 
 

@@ -282,7 +282,8 @@ def main():
         while not controller:
             watchdog.tick()
             try:
-                controller = RoonController(config.app_info, Path('.roon-token'))
+                controller = RoonController(config.app_info, Path('.roon-token'),
+                                            on_progress=watchdog.tick)
                 logging.info("Successfully connected to Roon Core.")
             except RoonControllerE as ex:
                 logging.error("Failed to connect to Roon Core: %s. Retrying in 60 seconds...", ex.msg)
