@@ -12,7 +12,7 @@ class RemoteConfigE(Exception):
     """ implement a basic exception for config related issues"""
 
     def __init__(self, msg):
-        super(RemoteConfigE, self).__init__()
+        super(RemoteConfigE, self).__init__(msg)
         self.msg = msg
 
 

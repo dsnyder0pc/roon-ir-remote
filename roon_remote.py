@@ -5,12 +5,15 @@ commands towards a certain _Zone_ in Roon.
 """
 # !/usr/bin/env python
 import logging
+import os
+import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 import evdev
 from evdev import InputDevice, ecodes, categorize
@@ -23,6 +26,85 @@ from app.output import RoonOutputE
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s %(module)s: %(message)s')
 logger = logging.getLogger('roon_remote')
+
+# how long the event loop may sit idle before it wakes up to check on the
+# Roon session; nobody presses a button overnight, so without this the loop
+# blocks in evdev forever and never notices a dead socket
+HEARTBEAT_INTERVAL = 30
+
+# the loop ticks every HEARTBEAT_INTERVAL, so silence for this long means it
+# is wedged somewhere it cannot report from
+WATCHDOG_TIMEOUT = 180
+
+
+class Watchdog:
+    """
+    Guards the event loop against going silent.
+
+    On 2026-09-14 the Roon session dropped and the process sat there for two
+    days, logging nothing and answering no buttons, while systemd still saw a
+    healthy service. Nothing inside the process noticed. This notices: the
+    loop ticks as it goes round, and if the ticks stop the process ends so
+    that Restart=on-failure gives us a fresh one.
+    """
+
+    def __init__(self, timeout: int = WATCHDOG_TIMEOUT, on_expire: Optional[Callable[[], None]] = None):
+        self._timeout = timeout
+        self._on_expire = on_expire or (lambda: os._exit(1))
+        self._lock = threading.Lock()
+        self._last_tick = time.monotonic()
+
+    def tick(self) -> None:
+        """Record that the event loop is still going round."""
+        with self._lock:
+            self._last_tick = time.monotonic()
+
+    def silent_for(self) -> float:
+        """Seconds since the last tick."""
+        with self._lock:
+            return time.monotonic() - self._last_tick
+
+    def expired(self) -> bool:
+        """True once the event loop has been silent for longer than the timeout."""
+        return self.silent_for() > self._timeout
+
+    def start(self) -> threading.Thread:
+        """Run the watch in the background for the life of the process."""
+        thread = threading.Thread(target=self.run, name='watchdog', daemon=True)
+        thread.start()
+        return thread
+
+    def run(self) -> None:
+        """Watch the event loop, and end the process once it stops ticking."""
+        interval = max(self._timeout / 4, 0.05)
+        while True:
+            time.sleep(interval)
+            if self.expired():
+                logger.critical("event loop silent for %.0fs, exiting so systemd restarts the service",
+                                self.silent_for())
+                # the default on_expire is os._exit, which runs no handlers, so
+                # push the line above out to the journal first
+                for handler in logging.getLogger().handlers:
+                    handler.flush()
+                self._on_expire()
+                return
+
+
+def read_key_events(dev: InputDevice, timeout: float = HEARTBEAT_INTERVAL):
+    """
+    Yield input events, and None every `timeout` seconds while nothing is
+    pressed. evdev's own read_loop() blocks until the next key, which leaves
+    the caller no chance to check anything in between.
+    """
+    while True:
+        readable, _, _ = select.select([dev.fd], [], [], timeout)
+        if not readable:
+            yield None
+            continue
+        try:
+            yield from dev.read()
+        except BlockingIOError:
+            continue
 
 
 def exit_handler(_received_signal, _frame):
@@ -108,7 +190,8 @@ def build_transport_actions(zone: RoonOutput) -> Dict[str, Callable[[], None]]:
     }
 
 
-def monitor_remote(zone: RoonOutput, dev: InputDevice, mapping: RemoteKeycodeMapping, zone_name: str):
+def monitor_remote(zone: RoonOutput, dev: InputDevice, mapping: RemoteKeycodeMapping, zone_name: str,
+                   *, controller: Optional[RoonController] = None, watchdog: Optional[Watchdog] = None):
     """start an event loop on InputDevice"""
     logger.info("Starting event monitor for zone: '%s'", zone_name)
 
@@ -118,7 +201,16 @@ def monitor_remote(zone: RoonOutput, dev: InputDevice, mapping: RemoteKeycodeMap
     transport_actions = build_transport_actions(zone)
 
     logger.debug('opening exclusively InputDevice: %s', dev.path)
-    for event in dev.read_loop():
+    for event in read_key_events(dev, HEARTBEAT_INTERVAL):
+        if watchdog:
+            watchdog.tick()
+
+        if event is None:
+            # idle tick: nobody pressed anything, so check the session instead
+            if controller and not controller.check_alive():
+                raise RoonControllerE('Roon session is no longer alive')
+            continue
+
         if event.value != 1:
             # ignore everything that is not KEY_DOWN
             continue
@@ -180,11 +272,15 @@ def main():
         logging.error('Could not find a valid InputDevice. Tried: %s', device_names_to_try)
         sys.exit(1)
 
+    watchdog = Watchdog()
+    watchdog.start()
+
     # --- Outer loop for Core connection resiliency ---
     while True:
         controller = None
         # 1. Establish connection to the Roon Core
         while not controller:
+            watchdog.tick()
             try:
                 controller = RoonController(config.app_info, Path('.roon-token'))
                 logging.info("Successfully connected to Roon Core.")
@@ -202,6 +298,7 @@ def main():
         has_logged_zone_warning = False
         while True:
             output = None
+            watchdog.tick()
             try:
                 # 2. Find the specified Zone
                 output = controller.get_output(config.zone)
@@ -209,7 +306,8 @@ def main():
                 has_logged_zone_warning = False  # Reset flag on success
 
                 # 3. Monitor for remote control events
-                monitor_remote(output, event_dev, mapping, config.zone)
+                monitor_remote(output, event_dev, mapping, config.zone,
+                               controller=controller, watchdog=watchdog)
                 logging.warning("Event monitor stopped unexpectedly. Re-checking for zone...")
                 has_logged_zone_warning = False
 

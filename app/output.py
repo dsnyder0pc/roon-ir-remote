@@ -11,6 +11,7 @@ logger = logging.getLogger('output')
 class RoonOutputE(Exception):
     """Basic Class for Output """
     def __init__(self, msg):
+        super().__init__(msg)
         self.msg = msg
 
 

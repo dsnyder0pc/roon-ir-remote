@@ -11,6 +11,7 @@ logger.setLevel(logging.DEBUG)
 class AmplifierE(Exception):
 
     def __init__(self, msg):
+        super().__init__(msg)
         self._msg = msg
 
 
