@@ -14,6 +14,46 @@ from .output import RoonOutput
 logger = logging.getLogger('roon-controller')
 logger.setLevel(logging.DEBUG)
 
+# Connects abandoned in flight, as (thread, websocket) pairs.
+#
+# websocket-client assigns the WebSocket to the app before connect() returns,
+# so RoonApiWebSocket.stop() drops its own reference while the OS socket is
+# still inside connect(): nothing there can close it. If the connect lands
+# afterwards, the connection stays ESTABLISHED and we are the only ones left
+# holding the object that can release it. Swept from the main thread only.
+_abandoned_connects = []
+
+
+def remember_abandoned_connect(socket) -> None:
+    """Hold on to a connect we are walking away from, so it can be closed."""
+    # pylint: disable=protected-access
+    pending = getattr(getattr(socket, '_socket', None), 'sock', None)
+    if pending is not None:
+        _abandoned_connects.append((socket, pending))
+
+
+def close_abandoned_connects() -> int:
+    """
+    Close any abandoned connect that has since landed, and forget the ones
+    that never will. Returns the number of sockets closed.
+    """
+    closed = 0
+    for entry in list(_abandoned_connects):
+        thread, pending = entry
+        if getattr(pending, 'connected', False) or getattr(pending, 'sock', None) is not None:
+            try:
+                pending.close()
+                closed += 1
+            except OSError as ex:
+                logger.debug('closing an abandoned connect: %s' % ex)
+            _abandoned_connects.remove(entry)
+        elif not thread.is_alive():
+            # the connect failed and the thread is gone; nothing was left open
+            _abandoned_connects.remove(entry)
+    if closed:
+        logger.info('closed %d abandoned connect(s) that landed after we gave up' % closed)
+    return closed
+
 
 class RoonControllerE(Exception):
     def __init__(self, msg):
@@ -52,6 +92,8 @@ class RoonController(object):
         # called while we wait, so a caller watching for a wedged process can
         # tell "still waiting for the core" from "stopped running"
         self._on_progress = on_progress or (lambda: None)
+
+        close_abandoned_connects()
 
         server = self._discover_server()
         if not server or not server[0]:
@@ -156,11 +198,16 @@ class RoonController(object):
                 raise RoonControllerE("%s did not register us within %ds; is the extension enabled in Roon?"
                                       % (host, self.AUTHORIZE_TIMEOUT))
         except RoonControllerE:
-            self._api.stop()
+            self._abandon()
             raise
 
         if not self._wait_until(self.SUBSCRIBE_TIMEOUT, lambda: bool(self._api.outputs)):
             logger.warning("no outputs from %s yet, carrying on" % host)
+
+    def _abandon(self) -> None:
+        """Stop the half-built api, keeping hold of a connect still in flight."""
+        remember_abandoned_connect(self._socket())
+        self._api.stop()
 
     def is_connected(self) -> bool:
         """Passive check of the websocket state. Cheap, safe to call often."""
@@ -190,6 +237,8 @@ class RoonController(object):
         """
         if probe_interval is None:
             probe_interval = self.PROBE_INTERVAL
+
+        close_abandoned_connects()
 
         if not self.is_connected():
             logger.warning('websocket to the core is no longer connected')
