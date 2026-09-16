@@ -1,7 +1,6 @@
 """Class handling the logic and commands provided by an Roon output!"""
-import json
 import logging
-from typing import Dict, List
+from typing import Dict
 
 from .controller import RoonApi
 
@@ -18,9 +17,7 @@ class RoonOutputE(Exception):
 class RoonOutput:
     """Implment logic for Roon Outputs"""
 
-    EVENT_FILTER = ['outputs_changed', 'zones_changed']
-
-    def __init__(self, api: RoonApi, output_name: str, register_callback=False):
+    def __init__(self, api: RoonApi, output_name: str):
         super(RoonOutput).__init__()
         self._api = api
         self._name = output_name
@@ -30,28 +27,7 @@ class RoonOutput:
             raise RoonOutputE('could not find any output with name "{}"'.format(output_name))
 
         self._oid = oid
-        if register_callback:
-            logger.debug('enabling callback for zone updates')
-            self._api.register_state_callback(self._callback,
-                                              event_filter=self.EVENT_FILTER,
-                                              id_filter=None)
         logger.debug('instantiated RoonOutput {}'.format(output_name))
-
-    def _callback(self, event: str, ids_changed: List):
-        """Callback for debugging purposes."""
-        logger.debug('==> callback triggered: {} => {}'.format(event, repr(ids_changed)))
-        if 'zones_changed' in event:
-            for zid_changed in ids_changed:
-                if zid_changed == self._get_zone_id():
-                    logger.debug('==> change for current ZID detected {}'.format(self._oid))
-                    logger.debug('==> {}'.format(json.dumps(self._api.zones[zid_changed], indent=2)))
-        elif 'outputs_changed' in event:
-            for oid_changed in ids_changed:
-                if oid_changed == self._oid:
-                    logger.debug('==> change for current OID detected')
-                    logger.debug('==> {}'.format(json.dumps(self._api.outputs[oid_changed], indent=2)))
-        logger.debug("==> FINISHED <==\n")
-        pass
 
     @property
     def zone_id(self):
@@ -90,14 +66,6 @@ class RoonOutput:
         else:
             return {}
 
-    def _get_zone_id(self) -> str:
-        output = self._get_output()
-        if not output:
-            logger.error('failed to retrieve output DICT for {}'. format(self._oid))
-        zid = output['zone_id']
-        logger.debug('==> found ZID {} for OID {}'.format(zid, self._oid))
-        return zid
-
     def pause(self):
         """Next Track"""
         self._api.playback_control(self.zone_id, "pause")
@@ -106,9 +74,6 @@ class RoonOutput:
         """Stop Player and Clear Playlist"""
         self._api.playback_control(self.zone_id, "stop")
         self._api.seek(self.zone_id, 0)
-
-    def playpause(self):
-        self._api.playback_control(self.zone_id, "playpause")
 
     def repeat(self, repeat: bool):
         logger.debug(f"{'enable' if repeat else 'disable'} for zone {self.zone_id}")

@@ -22,7 +22,6 @@ class FakeApi:
         self.outputs = {}
         self.zones = {}
         self.calls = []
-        self.callbacks = []
         if known:
             output = {'output_id': OID, 'zone_id': ZID, 'display_name': NAME}
             if volume:
@@ -51,9 +50,6 @@ class FakeApi:
     def change_volume(self, output_id, value, method="absolute"):
         self.calls.append(('change_volume', output_id, value, method))
 
-    def register_state_callback(self, callback, event_filter=None, id_filter=None):
-        self.callbacks.append((callback, event_filter, id_filter))
-
 
 @pytest.fixture(name='api')
 def api_fixture():
@@ -76,20 +72,6 @@ def test_unknown_output_raises(api):
 
 def test_known_output_resolves_to_its_id(api):
     assert RoonOutput(api, NAME)._oid == OID
-
-
-def test_no_callback_is_registered_by_default(api):
-    """get_output() passes register_callback=False; nothing should subscribe."""
-    RoonOutput(api, NAME)
-    assert api.callbacks == []
-
-
-def test_callback_registration_uses_the_event_filter(api):
-    output = RoonOutput(api, NAME, register_callback=True)
-    assert len(api.callbacks) == 1
-    callback, event_filter, _ = api.callbacks[0]
-    assert callback == output._callback
-    assert event_filter == RoonOutput.EVENT_FILTER
 
 
 # --- reading state --------------------------------------------------------
