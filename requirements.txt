@@ -1,5 +1,7 @@
 
 roonapi==0.1.1
+# roonapi leaves this unpinned, and app/controller.py reads its socket state
+websocket-client==1.9.2
 evdev
 flake8
 pylint
