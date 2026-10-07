@@ -1,12 +1,16 @@
 import json
+import socket
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, Tuple, Type
 from typing import List
 from typing import Tuple
 import logging
 
-from roonapi import RoonApi, RoonDiscovery
+from roonapi import RoonApi
+from roonapi.constants import SOOD_MULTICAST_IP, SOOD_PORT
+from roonapi.soodmessage import SOODMessage
 
 from .token import RoonToken
 from .output import RoonOutput
@@ -53,6 +57,46 @@ def close_abandoned_connects() -> int:
     if closed:
         logger.info('closed %d abandoned connect(s) that landed after we gave up' % closed)
     return closed
+
+
+SOOD_SERVICE_ID = "00720724-5143-4a9b-abac-0e50cba674bb"
+
+
+def sood_query(tid: str) -> bytes:
+    """A SOOD discovery query: header, then length-prefixed key/value pairs."""
+    def prop(key: str, value: str) -> bytes:
+        k, v = key.encode(), value.encode()
+        return bytes([len(k)]) + k + len(v).to_bytes(2, 'big') + v
+    return b"SOOD\x02Q" + prop("query_service_id", SOOD_SERVICE_ID) + prop("_tid", tid)
+
+
+def discover_servers(timeout: float = 5) -> List[Tuple[str, str]]:
+    """
+    Ask the network for Roon cores, as RoonDiscovery does, but with a fresh
+    transaction id on every query.
+
+    RoonDiscovery sends a query read from a file shipped with the library, so
+    every install on the network uses the same _tid. A core ignores a _tid it
+    has answered in the last few seconds, so a second Host starting at the
+    same time, or a quick double restart, got no answer at all and sat out
+    the 60s retry.
+    """
+    query = sood_query(str(uuid.uuid4()))
+    servers = []
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 32)
+        sock.sendto(query, (SOOD_MULTICAST_IP, SOOD_PORT))
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.sendto(query, ("<broadcast>", SOOD_PORT))
+        sock.settimeout(timeout)
+        while True:
+            try:
+                data, server = sock.recvfrom(1024)
+            except socket.timeout:
+                break
+            message = SOODMessage(data).as_dictionary
+            servers.append((server[0], message["properties"]["http_port"]))
+    return servers
 
 
 class SocketAwareRoonApi(RoonApi):
@@ -197,14 +241,11 @@ class RoonController(object):
         Run the discovery that allows us to detect the server,
         return the very first server discovered.
         """
-        discover = RoonDiscovery(None)
         try:
-            servers = discover.all()
+            servers = discover_servers()
         except OSError as ex:
             # the network may not be up yet, e.g. when started at boot
             raise RoonControllerE("discovery failed: %s" % ex) from ex
-        finally:
-            discover.stop()
         logger.debug("Discovery found: %s" % repr(servers))
         if not servers:
             logger.debug('failed to discover Roon server')
