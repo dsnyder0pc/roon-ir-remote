@@ -70,34 +70,63 @@ class SocketAwareRoonApi(RoonApi):
     guards it with `if not self._roonsocket`, which _server_setup has already
     made truthy, so the loop never runs.
 
-    The wait is bounded by a deadline taken at construction, so this cannot
-    become the hang that blocking_init was. On expiry, or against a socket
-    that has already failed, it falls through to the library's own behaviour
-    and _wait_until_ready reports the failed connect as it does now.
+    The wait for the socket is bounded by a deadline taken at construction,
+    so this cannot become the hang that blocking_init was. On expiry, or
+    against a socket that has already failed, it falls through to the
+    library's own behaviour and _wait_until_ready reports the failed connect
+    as it does now.
+
+    Once the socket is up, registration gets only a short grace. A core that
+    knows our token answers within a second; one that does not stays silent
+    until someone enables the extension in Roon, and that wait belongs to
+    _wait_until_ready, which says so in the journal and gives it minutes.
+    Spending the socket deadline on it instead dropped a perfectly good
+    connection every 30s, taking the extension out of Roon's Settings before
+    anyone could click Enable. The requests are skipped rather than sent
+    unregistered: the zones and outputs subscriptions fill both in as soon as
+    registration lands.
     """
 
     SOCKET_WAIT = 30
 
+    REGISTER_WAIT = 5
+
     def __init__(self, *args, on_progress=None, **kwargs):
         self._ready_deadline = time.monotonic() + self.SOCKET_WAIT
+        self._register_deadline = None
         self._progress = on_progress or (lambda: None)
         super().__init__(*args, **kwargs)
 
-    def _await_ready(self) -> None:
-        """Wait for registration, but never past the deadline."""
-        while not self.ready and time.monotonic() < self._ready_deadline:
+    def _await_ready(self) -> bool:
+        """
+        Wait for registration, but never past the deadlines. Returns False
+        when the socket is up but Roon has not registered us, so there is no
+        point asking.
+        """
+        while not self.ready:
             socket = getattr(self, '_roonsocket', None)
             if socket is not None and getattr(socket, 'failed_state', False):
-                return  # the connection is already lost; nothing to wait for
+                return True  # the connection is already lost; nothing to wait for
+            now = time.monotonic()
+            if socket is not None and getattr(socket, 'connected', False):
+                if self._register_deadline is None:
+                    self._register_deadline = now + self.REGISTER_WAIT
+                if now >= self._register_deadline:
+                    return False
+            elif now >= self._ready_deadline:
+                return True
             self._progress()
             time.sleep(0.05)
+        return True
 
     def _get_zones(self):
-        self._await_ready()
+        if not self._await_ready():
+            return {}
         return super()._get_zones()
 
     def _get_outputs(self):
-        self._await_ready()
+        if not self._await_ready():
+            return {}
         return super()._get_outputs()
 
 
@@ -227,15 +256,14 @@ class RoonController(object):
         deadline = getattr(self._api, '_ready_deadline', None)
         if deadline is None:
             deadline = time.monotonic() + self.CONNECT_TIMEOUT
-        while time.monotonic() < deadline:
-            if self._socket_is_open():
-                return
+        while not self._socket_is_open():
             socket = self._socket()
             if socket is None or getattr(socket, 'failed_state', False):
                 raise RoonControllerE("websocket to %s:%s failed" % (host, port))
+            if time.monotonic() >= deadline:
+                raise RoonControllerE("no websocket to %s:%s after %ds" % (host, port, self.CONNECT_TIMEOUT))
             self._on_progress()
             time.sleep(0.05)
-        raise RoonControllerE("no websocket to %s:%s after %ds" % (host, port, self.CONNECT_TIMEOUT))
 
     def _wait_until_ready(self, host, port) -> None:
         """

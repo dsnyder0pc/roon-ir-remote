@@ -174,3 +174,19 @@ def test_the_socket_wait_shares_the_api_deadline():
         controller._wait_until_ready('192.0.2.1', 9330)
 
     assert _time.monotonic() - started < 1, "should not start a second 30s wait"
+
+
+def test_an_open_socket_is_not_failed_by_a_spent_deadline():
+    """
+    The api spends its deadline on construction; a socket that is open by
+    then must go on to the authorization wait, not be reported missing.
+    """
+    import time as _time
+    api = FakeApi(FakeSocket(connected=True), ready=False)
+    api._ready_deadline = _time.monotonic() - 1
+    controller = controller_with(api, authorize=0.3)
+
+    with pytest.raises(RoonControllerE) as caught:
+        controller._wait_until_ready('192.0.2.1', 9330)
+
+    assert 'did not register us' in str(caught.value)

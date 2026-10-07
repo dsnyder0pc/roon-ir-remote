@@ -14,13 +14,15 @@ from app.controller import SocketAwareRoonApi
 ZONES = {'zone-1': {'zone_id': 'zone-1', 'state': 'playing'}}
 
 
-def api(ready=False, failed=False, deadline_in=5.0):
+def api(ready=False, failed=False, deadline_in=5.0, connected=False, register_wait=5.0):
     """A SocketAwareRoonApi with the library's __init__ bypassed."""
     instance = SocketAwareRoonApi.__new__(SocketAwareRoonApi)
     instance.ready = ready
     instance._ready_deadline = time.monotonic() + deadline_in
+    instance._register_deadline = None
+    instance.REGISTER_WAIT = register_wait
     instance._progress = lambda: None
-    instance._roonsocket = type('S', (), {'failed_state': failed})()
+    instance._roonsocket = type('S', (), {'failed_state': failed, 'connected': connected})()
     instance.requests = []
 
     def fake_request(command, data=None):
@@ -109,3 +111,34 @@ def test_deadline_is_taken_once_not_per_call():
 def test_neither_call_raises_when_the_core_never_answers(method):
     instance = api(ready=False, deadline_in=0.1)
     getattr(instance, method)()   # must return, not raise
+
+
+def test_an_unregistered_socket_gets_a_short_grace_not_the_socket_deadline():
+    """
+    The theater bug: socket up, extension not yet enabled in Roon. Waiting
+    the whole socket deadline here made the controller drop the connection.
+    """
+    instance = api(ready=False, connected=True, deadline_in=30, register_wait=0.3)
+    started = time.monotonic()
+    assert instance._get_zones() == {}
+    assert time.monotonic() - started < 2, "the grace, not SOCKET_WAIT"
+    assert not instance.requests, "nothing goes out on an unregistered session"
+
+
+def test_the_grace_is_taken_once_not_per_call():
+    instance = api(ready=False, connected=True, register_wait=0.3)
+    instance._get_zones()
+    started = time.monotonic()
+    assert instance._get_outputs() == {}
+    assert time.monotonic() - started < 0.2
+
+
+def test_registration_within_the_grace_still_asks():
+    instance = api(ready=False, connected=True, register_wait=5)
+
+    def register_soon():
+        time.sleep(0.3)
+        instance.ready = True
+
+    threading.Thread(target=register_soon, daemon=True).start()
+    assert instance._get_zones() == ZONES
