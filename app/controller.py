@@ -16,7 +16,6 @@ from .token import RoonToken
 from .output import RoonOutput
 
 logger = logging.getLogger('roon-controller')
-logger.setLevel(logging.DEBUG)
 
 # Connects abandoned in flight, as (thread, websocket) pairs.
 #
