@@ -17,7 +17,7 @@ class RoonToken:
     def read_from_file(path: Path) -> str:
         token = ""
         if path.exists():
-            token = path.open().read()
+            token = path.open(encoding='utf-8').read()
         return token
 
     def is_empty(self):
@@ -30,7 +30,7 @@ class RoonToken:
 
     def set(self, token: str) -> None:
         """set the token and write"""
-        with self._path.open('w') as f:
+        with self._path.open('w', encoding='utf-8') as f:
             f.write(token)
 
     def __str__(self):

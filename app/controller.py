@@ -261,7 +261,7 @@ class RoonController(object):
     @staticmethod
     def _read_as_json(path) -> Dict:
         _data = {}
-        with open(path) as f:
+        with open(path, encoding='utf-8') as f:
             _data = json.load(f)
         return _data
 

@@ -116,7 +116,7 @@ class RemoteConfig:
     def _read_as_json(path: Path) -> Dict:
         """Open a file and return JSON content"""
         data = {}
-        with path.open(mode='r') as f:
+        with path.open(mode='r', encoding='utf-8') as f:
             try:
                 data = json.load(f)
             except JSONDecodeError as ex:
